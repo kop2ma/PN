@@ -1,0 +1,6 @@
+[deploy]
+startCommand = "python main.py"
+
+[[services]]
+name = "web"
+port = 8000
