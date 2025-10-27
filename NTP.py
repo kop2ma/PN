@@ -1,667 +1,389 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+NTP.py - NTP Management compatible with main.py
+"""
+
+import os
+import json
 import requests
 from bs4 import BeautifulSoup
-import json
-import os
 
-# Pool Configuration - فقط سرورهای ایرانی
-NTP_SERVERS = [
-    "ir.pool.ntp.org",
-    "0.ir.pool.ntp.org",
-    "1.ir.pool.ntp.org", 
-    "2.ir.pool.ntp.org",
-    "3.ir.pool.ntp.org",
-    "ntp1.availab.com",  # سرور ایرانی
-    "time.nuri.net"      # سرور ایرانی
-]
+# ===========================
+# Configuration - Compatible with main.py
+# ===========================
+DEFAULT_NTP_SERVERS = ["ir.pool.ntp.org"]
 
-TIMEZONES = [
-    "UTC", "Asia/Tehran", "Asia/Dubai", "Europe/Istanbul", 
-    "Asia/Shanghai", "Europe/London", "America/New_York",
-    "Europe/Paris", "Asia/Tokyo", "Asia/Kolkata"
-]
+def _get_miner_base(miner_name):
+    """Get miner base URL - Compatible with main.py"""
+    try:
+        from main import port_map, MINER_IP
+        miner_port = port_map.get(miner_name)
+        
+        if not miner_port:
+            return None, None, f"Port not found for miner {miner_name}"
+        
+        if not MINER_IP:
+            return None, None, "MINER_IP not set"
+        
+        base = f"https://{MINER_IP}:{miner_port}"
+        return base, miner_port, None
+        
+    except Exception as e:
+        return None, None, f"Error: {str(e)}"
+
+def _session_noverify():
+    """Create session without verify - Compatible with main.py"""
+    s = requests.Session()
+    s.verify = False
+    requests.packages.urllib3.disable_warnings()
+    return s
 
 def login_to_miner(miner_name, username, password):
-    """Login to miner and return session"""
-    from pools_manager import port_map
+    """Login to miner - Compatible with main.py"""
+    base, port, err = _get_miner_base(miner_name)
+    if err:
+        return None, err
     
-    miner_port = port_map.get(miner_name)
-    if not miner_port:
-        print(f"❌ Port not found for miner {miner_name}")
-        return None
-    
-    MINER_IP = os.environ.get("MINER_IP")
-    base_url = f"https://{MINER_IP}:{miner_port}"
-    login_url = f"{base_url}/cgi-bin/luci"
-    
-    session = requests.Session()
-    session.verify = False
-    requests.packages.urllib3.disable_warnings()
+    login_url = f"{base}/cgi-bin/luci"
+    session = _session_noverify()
     
     try:
-        print(f"🔐 Attempting NTP login to miner {miner_name}...")
-        response = session.get(login_url, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        login_data = {
-            'luci_username': username,
-            'luci_password': password
-        }
-        
-        login_response = session.post(login_url, data=login_data, timeout=10, allow_redirects=False)
-        
-        if login_response.status_code in [302, 303]:
-            print(f"✅ Successfully logged into miner {miner_name} for NTP")
-            return session
-        else:
-            print(f"❌ Login failed for miner {miner_name} - Status: {login_response.status_code}")
-            return None
+        # Initial GET to get cookies
+        session.get(login_url, timeout=10)
     except Exception as e:
-        print(f"❌ Login error for miner {miner_name}: {str(e)}")
-        return None
-
-def get_ntp_settings(miner_name, username, password):
-    """Get current NTP and timezone settings from miner"""
-    session = login_to_miner(miner_name, username, password)
-    if not session:
-        return {"error": "Login failed"}
+        return None, f"GET login page failed: {e}"
     
-    try:
-        from pools_manager import port_map
-        MINER_IP = os.environ.get("MINER_IP")
-        miner_port = port_map.get(miner_name)
-        ntp_url = f"https://{MINER_IP}:{miner_port}/cgi-bin/luci/admin/system/system"
-        
-        print(f"📡 Fetching NTP settings from miner {miner_name}...")
-        response = session.get(ntp_url, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Extract current timezone
-        timezone_select = soup.find('select', {'id': 'cbid.system.cfg02e48a.zonename'})
-        current_timezone = "Asia/Tehran"  # default
-        if timezone_select:
-            selected_option = timezone_select.find('option', selected=True)
-            if selected_option:
-                current_timezone = selected_option.get('value', 'Asia/Tehran')
-        
-        # Extract NTP servers
-        ntp_inputs = soup.find_all('input', {'name': 'cbid.system.ntp.server'})
-        current_servers = [inp.get('value', '') for inp in ntp_inputs if inp.get('value')]
-        
-        # Extract NTP enabled status
-        ntp_enabled = soup.find('input', {'id': 'cbid.system.ntp.enabled'})
-        is_ntp_enabled = ntp_enabled and ntp_enabled.get('checked') == 'checked'
-        
-        return {
-            "timezone": current_timezone,
-            "ntp_servers": current_servers,
-            "ntp_enabled": is_ntp_enabled,
-            "success": f"Settings retrieved for miner {miner_name}"
-        }
-        
-    except Exception as e:
-        return {"error": f"Failed to get NTP settings: {str(e)}"}
-
-def update_ntp_settings(miner_name, timezone, ntp_servers, ntp_enabled, username, password):
-    """Update NTP and timezone settings for miner"""
-    session = login_to_miner(miner_name, username, password)
-    if not session:
-        return {"error": "Login failed"}
+    # Different payloads for compatibility
+    payloads = [
+        {"luci_username": username, "luci_password": password},
+        {"username": username, "password": password},
+    ]
     
+    for payload in payloads:
+        try:
+            resp = session.post(login_url, data=payload, timeout=10, allow_redirects=False)
+            if resp.status_code in (200, 302, 303):
+                return session, None
+        except Exception as e:
+            continue
+    
+    return None, "Login failed with all payloads"
+
+def super_ntp_update(miner_name, enable_ntp=True, custom_servers=None, timezone="Asia/Tehran", username="admin", password="admin"):
+    """
+    🚀 Super NTP Update - Compatible with main.py
+    """
     try:
-        from pools_manager import port_map
-        MINER_IP = os.environ.get("MINER_IP")
-        miner_port = port_map.get(miner_name)
-        ntp_url = f"https://{MINER_IP}:{miner_port}/cgi-bin/luci/admin/system/system"
+        # 1. Login to miner
+        session, err = login_to_miner(miner_name, username, password)
+        if not session:
+            return {"success": False, "message": f"❌ Login error: {err}"}
         
-        print(f"📡 Loading NTP configuration page for {miner_name}...")
-        response = session.get(ntp_url, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # 2. Get base URL
+        base, port, err2 = _get_miner_base(miner_name)
+        if err2:
+            return {"success": False, "message": f"❌ {err2}"}
         
-        # Extract token
-        token_input = soup.find('input', {'name': 'token'})
-        if not token_input:
-            return {"error": "Cannot find form token"}
+        system_url = f"{base}/cgi-bin/luci/admin/system/system"
         
-        token = token_input.get('value')
+        # 3. Get system page
+        try:
+            response = session.get(system_url, timeout=10)
+            if response.status_code != 200:
+                return {"success": False, "message": f"❌ Page load error: {response.status_code}"}
+        except Exception as e:
+            return {"success": False, "message": f"❌ Page load error: {e}"}
         
-        # Prepare form data
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # 4. Get security token
+        token_input = soup.find("input", {"name": "token"})
+        token = token_input["value"] if token_input and token_input.has_attr("value") else ""
+        
+        if not token:
+            return {"success": False, "message": "❌ Security token not found"}
+        
+        # 5. Prepare data
+        servers = custom_servers or DEFAULT_NTP_SERVERS
         form_data = {
-            'token': token,
-            'cbi.submit': '1',
-            'cbi.apply': 'Save & Apply'
+            "token": token,
+            "cbi.submit": "1",
+            "cbi.apply": "Save & Apply",
         }
         
-        # Add timezone
-        form_data['cbid.system.cfg02e48a.zonename'] = timezone
+        # Set timezone
+        tz_keys = [
+            "cbid.system.cfg02e48a.zonename",
+            "cbid.system.system.zonename", 
+            "cbid.system.timezone"
+        ]
+        for key in tz_keys:
+            form_data[key] = timezone
         
-        # Add NTP enabled status
-        form_data['cbid.system.ntp.enabled'] = '1' if ntp_enabled else '0'
+        # Enable/disable NTP
+        ntp_value = "1" if enable_ntp else "0"
+        form_data.update({
+            "cbid.system.ntp.enabled": ntp_value,
+            "cbi.cbe.system.ntp.enabled": ntp_value,
+        })
         
-        # Add NTP servers (up to 4 servers as in the original form)
-        for i, server in enumerate(ntp_servers[:4], 1):
-            form_data[f'cbid.system.ntp.server.{i}'] = server
+        # Add NTP servers (only one server)
+        if servers:
+            form_data["cbid.system.ntp.server"] = servers[0]
+            form_data["cbid.system.ntp.server.1"] = servers[0]
         
-        print(f"🔄 Updating NTP settings for {miner_name}...")
-        print(f"   Timezone: {timezone}")
-        print(f"   NTP Enabled: {ntp_enabled}")
-        print(f"   NTP Servers: {', '.join(ntp_servers[:4])}")
-        
-        update_response = session.post(ntp_url, data=form_data, timeout=10)
-        
-        if update_response.status_code == 200:
-            print(f"✅ NTP settings successfully updated for miner {miner_name}")
-            return {"success": f"NTP settings updated for miner {miner_name}"}
-        else:
-            print(f"❌ NTP update failed for {miner_name} - Status: {update_response.status_code}")
-            return {"error": f"NTP update failed with status {update_response.status_code}"}
+        # 6. Send request
+        try:
+            post_response = session.post(system_url, data=form_data, timeout=15)
             
+            if post_response.status_code in (200, 302):
+                return {
+                    "success": True, 
+                    "message": f"✅ NTP updated for miner {miner_name}",
+                    "ntp_enabled": enable_ntp,
+                    "servers": servers,
+                    "timezone": timezone,
+                    "miner": miner_name
+                }
+            else:
+                return {"success": False, "message": f"❌ Server error: {post_response.status_code}"}
+                
+        except Exception as e:
+            return {"success": False, "message": f"❌ Send error: {e}"}
+        
     except Exception as e:
-        print(f"❌ Connection error for {miner_name}: {str(e)}")
-        return {"error": f"Connection error: {str(e)}"}
+        return {"success": False, "message": f"❌ Unknown error: {str(e)}"}
+
+def bulk_super_ntp_update(miner_names, enable_ntp=True, custom_servers=None, timezone="Asia/Tehran", username="admin", password="admin"):
+    """
+    Bulk update miners - Compatible with main.py
+    """
+    results = []
+    for miner in miner_names:
+        result = super_ntp_update(miner, enable_ntp, custom_servers, timezone, username, password)
+        results.append({
+            "miner": miner,
+            "success": result.get("success", False),
+            "message": result.get("message", "")
+        })
+    
+    return results
+
+# ===========================
+# Existing functions for compatibility
+# ===========================
+def update_ntp_settings(miner_name, timezone, ntp_servers, ntp_enabled, username, password):
+    """
+    Main function for main.py - Compatible with existing route
+    """
+    return super_ntp_update(
+        miner_name=miner_name,
+        enable_ntp=ntp_enabled,
+        custom_servers=ntp_servers,
+        timezone=timezone,
+        username=username,
+        password=password
+    )
 
 def get_ntp_html():
-    """HTML مربوط به مدیریت NTP و تایم‌زون"""
+    """
+    NTP Modal HTML - Better feedback and English
+    """
     return '''
-    <!-- NTP Configuration Modal -->
-    <div id="ntpModal" class="modal">
-        <div class="modal-header">
-            <h3 class="modal-title" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">⏰ TIME & NTP SETTINGS</h3>
-            <button class="modal-close" onclick="closeNtpModal()" style="background: #ef4444; color: white; border: none; border-radius: 50%; width: 32px; height: 32px; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center;">×</button>
+<!-- NTP Modal -->
+<div id="ntpModalOverlay" style="display:none; position:fixed; left:0; top:0; right:0; bottom:0; background:rgba(0,0,0,0.6); z-index:10000;" onclick="closeNtpModal()"></div>
+<div id="ntpModal" class="modal" style="display:none; position:fixed; z-index:10001; left:50%; top:50%; transform:translate(-50%,-50%); width: min(500px, 96%); background:linear-gradient(135deg, #1e3a8a 0%, #3730a3 100%); padding:25px; border-radius:20px; border:2px solid #4f46e5; box-shadow:0 20px 60px rgba(0,0,0,0.5); color:white;">
+    
+    <!-- Header -->
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:25px; border-bottom:2px solid rgba(255,255,255,0.2); padding-bottom:15px;">
+        <h3 style="margin:0; color:white; font-size:24px; font-weight:800;">🚀 SUPER NTP UPDATE</h3>
+        <button onclick="closeNtpModal()" style="background:#ef4444; color:white; border:none; width:35px; height:35px; border-radius:50%; cursor:pointer; font-size:18px; font-weight:bold;">×</button>
+    </div>
+
+    <!-- Settings -->
+    <div style="margin-bottom:25px;">
+        <!-- Enable NTP -->
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:20px; padding:15px; background:rgba(255,255,255,0.1); border-radius:12px;">
+            <input type="checkbox" id="enableNTP" checked style="width:20px; height:20px;">
+            <label style="font-weight:700; color:white; cursor:pointer;">Enable NTP Sync</label>
         </div>
-        
-        <!-- Miner Selection Section -->
-        <div class="miner-selection-section">
-            <div class="section-header">
-                <h4>🎯 SELECT MINERS</h4>
-                <div class="group-controls">
-                    <button class="group-btn" onclick="selectNtpGroup('all')">SELECT ALL</button>
-                    <button class="group-btn" onclick="selectNtpGroup('A')">GROUP A</button>
-                    <button class="group-btn" onclick="selectNtpGroup('B')">GROUP B</button>
-                    <button class="group-btn" onclick="deselectNtpAll()">CLEAR ALL</button>
-                </div>
-            </div>
-            
-            <div class="miner-groups-container" id="ntpMinerGroups">
-                <!-- Miner groups will be loaded here -->
+
+        <!-- NTP Server (Single server) -->
+        <div style="margin-bottom:20px;">
+            <label style="display:block; margin-bottom:8px; font-weight:700; color:white;">🌐 NTP Server:</label>
+            <input type="text" id="ntpServer" value="ir.pool.ntp.org" 
+                   style="width:100%; padding:15px; border-radius:10px; border:1px solid rgba(255,255,255,0.3); background:rgba(255,255,255,0.1); color:white; font-family:monospace; font-size:16px;">
+            <div style="display:flex; gap:10px; margin-top:12px;">
+                <button onclick="setIranianServer()" style="flex:1; padding:12px; background:#3b82f6; color:white; border:none; border-radius:8px; cursor:pointer; font-weight:700;">🇮🇷 Iranian Server</button>
+                <button onclick="clearServer()" style="flex:1; padding:12px; background:#6b7280; color:white; border:none; border-radius:8px; cursor:pointer; font-weight:700;">🗑️ Clear</button>
             </div>
         </div>
 
-        <!-- Current Time Section -->
-        <div class="time-section">
-            <div class="section-header">
-                <h4>🕐 CURRENT TIME</h4>
-            </div>
-            <div class="current-time-display">
-                <div id="currentTime" class="time-value">Loading current time...</div>
-                <button class="sync-btn" onclick="syncWithBrowser()">
-                    <span>🔄</span>
-                    SYNC WITH BROWSER
-                </button>
-            </div>
-        </div>
-
-        <!-- Timezone Configuration -->
-        <div class="timezone-section">
-            <div class="section-header">
-                <h4>🌍 TIMEZONE SETTINGS</h4>
-            </div>
-            
-            <div class="form-group">
-                <label class="form-label">SELECT TIMEZONE</label>
-                <select class="form-select" id="timezoneSelect">
-                    <option value="UTC">UTC</option>
-                    <option value="Asia/Tehran" selected>Asia/Tehran (Iran)</option>
-                    <option value="Asia/Dubai">Asia/Dubai (UAE)</option>
-                    <option value="Europe/Istanbul">Europe/Istanbul (Turkey)</option>
-                    <option value="Asia/Shanghai">Asia/Shanghai (China)</option>
-                    <option value="Europe/London">Europe/London (UK)</option>
-                    <option value="America/New_York">America/New_York (USA)</option>
-                </select>
-            </div>
-        </div>
-
-        <!-- NTP Configuration -->
-        <div class="ntp-section">
-            <div class="section-header">
-                <h4>🔄 NTP SYNCHRONIZATION</h4>
-                <div class="ntp-actions">
-                    <button class="action-btn" onclick="fillIranianServers()">🇮🇷 IRANIAN SERVERS</button>
-                    <button class="action-btn" onclick="clearNtpServers()">🗑️ CLEAR SERVERS</button>
-                </div>
-            </div>
-            
-            <div class="form-group">
-                <label class="form-label">
-                    <input type="checkbox" id="ntpEnabled" checked onchange="toggleNtpServers()">
-                    ENABLE NTP CLIENT
-                </label>
-            </div>
-            
-            <div class="ntp-servers-container" id="ntpServersContainer">
-                <div class="form-group">
-                    <label class="form-label">NTP SERVER 1</label>
-                    <input type="text" class="form-input" id="ntpServer1" placeholder="e.g., ir.pool.ntp.org" value="ir.pool.ntp.org">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">NTP SERVER 2</label>
-                    <input type="text" class="form-input" id="ntpServer2" placeholder="e.g., 0.ir.pool.ntp.org" value="0.ir.pool.ntp.org">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">NTP SERVER 3</label>
-                    <input type="text" class="form-input" id="ntpServer3" placeholder="e.g., 1.ir.pool.ntp.org" value="1.ir.pool.ntp.org">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">NTP SERVER 4</label>
-                    <input type="text" class="form-input" id="ntpServer4" placeholder="e.g., 2.ir.pool.ntp.org" value="2.ir.pool.ntp.org">
-                </div>
-            </div>
-        </div>
-
-        <!-- Progress & Actions -->
-        <div class="action-section">
-            <div class="progress-container">
-                <div class="progress-header">
-                    <span>PROGRESS</span>
-                    <span id="ntpProgressText">0%</span>
-                </div>
-                <div class="progress-bar">
-                    <div class="progress-fill" id="ntpUpdateProgress" style="width: 0%"></div>
-                </div>
-            </div>
-            
-            <div class="action-buttons">
-                <button class="btn-cancel" onclick="closeNtpModal()">
-                    <span>✕</span>
-                    CANCEL
-                </button>
-                <button class="btn-apply" onclick="applyNtpSettings()">
-                    <span>💾</span>
-                    APPLY TO SELECTED MINERS
-                </button>
-            </div>
+        <!-- Timezone -->
+        <div style="margin-bottom:20px;">
+            <label style="display:block; margin-bottom:8px; font-weight:700; color:white;">🌍 Timezone:</label>
+            <select id="timezoneSelect" style="width:100%; padding:15px; border-radius:10px; border:1px solid rgba(255,255,255,0.3); background:rgba(255,255,255,0.1); color:white; font-size:16px;">
+                <option value="Asia/Tehran">Asia/Tehran - Iran</option>
+                <option value="UTC">UTC - Universal Time</option>
+                <option value="Europe/Istanbul">Europe/Istanbul - Turkey</option>
+                <option value="Asia/Dubai">Asia/Dubai - Dubai</option>
+            </select>
         </div>
     </div>
 
-    <div id="ntpModalOverlay" class="modal-overlay" onclick="closeNtpModal()"></div>
+    <!-- Progress -->
+    <div style="margin-bottom:25px; background:rgba(255,255,255,0.1); padding:20px; border-radius:12px;">
+        <div style="display:flex; justify-content:space-between; margin-bottom:12px; font-weight:700;">
+            <span style="color:white;">Progress:</span>
+            <span id="ntpProgressText" style="color:#60a5fa;">0%</span>
+        </div>
+        <div style="background:rgba(255,255,255,0.2); height:12px; border-radius:10px; overflow:hidden;">
+            <div id="ntpProgressBar" style="height:100%; width:0%; background:linear-gradient(90deg,#10b981,#3b82f6); transition:width 0.3s;"></div>
+        </div>
+        <div id="currentStatus" style="margin-top:10px; font-size:14px; color:#93c5fd; text-align:center; min-height:20px; font-weight:600;">Ready to start...</div>
+    </div>
 
-    <style>
-    .time-section, .timezone-section, .ntp-section {
-        background: linear-gradient(135deg, #1a1f2e 0%, #2d3748 100%);
-        padding: 20px;
-        border-radius: 12px;
-        margin-bottom: 20px;
-        border: 1px solid #4a5568;
-    }
-    
-    .current-time-display {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 15px;
-        flex-wrap: wrap;
-    }
-    
-    .time-value {
-        font-size: 18px;
-        font-weight: 700;
-        color: #e2e8f0;
-        background: rgba(255,255,255,0.1);
-        padding: 12px 20px;
-        border-radius: 10px;
-        border: 1px solid #4a5568;
-        flex: 1;
-        text-align: center;
-        font-family: 'Courier New', monospace;
-    }
-    
-    .sync-btn {
-        padding: 12px 20px;
-        background: linear-gradient(135deg, #3b82f6, #1d4ed8);
-        color: white;
-        border: none;
-        border-radius: 10px;
-        font-weight: 600;
-        cursor: pointer;
-        transition: all 0.3s ease;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        white-space: nowrap;
-    }
-    
-    .sync-btn:hover {
-        background: linear-gradient(135deg, #1d4ed8, #1e40af);
-        transform: translateY(-2px);
-    }
-    
-    .form-select {
-        width: 100%;
-        padding: 14px;
-        background: #1a202c;
-        border: 1px solid #4a5568;
-        border-radius: 10px;
-        color: #f7fafc;
-        font-size: 14px;
-        transition: all 0.3s ease;
-    }
-    
-    .form-select:focus {
-        outline: none;
-        border-color: #60a5fa;
-        box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.1);
-    }
-    
-    .ntp-servers-container {
-        transition: all 0.3s ease;
-    }
-    
-    .ntp-servers-container.disabled {
-        opacity: 0.6;
-        pointer-events: none;
-    }
-    
-    @media (max-width: 768px) {
-        .current-time-display {
-            flex-direction: column;
-        }
-        
-        .time-value {
-            width: 100%;
-        }
-        
-        .sync-btn {
-            width: 100%;
-            justify-content: center;
-        }
-    }
-    </style>
+    <!-- Buttons -->
+    <div style="display:flex; gap:12px;">
+        <button onclick="closeNtpModal()" style="flex:1; padding:16px; background:#6b7280; color:white; border:none; border-radius:10px; cursor:pointer; font-weight:700; font-size:16px;">❌ Cancel</button>
+        <button onclick="runSuperUpdate()" style="flex:1; padding:16px; background:linear-gradient(135deg,#10b981,#3b82f6); color:white; border:none; border-radius:10px; cursor:pointer; font-weight:800; font-size:16px;">🚀 RUN SUPER UPDATE</button>
+    </div>
+</div>
 
-    <script>
-    let selectedNtpMiners = [];
-    
-    // Initialize NTP modal
-    function initializeNtpModal() {
-        updateCurrentTime();
-        setInterval(updateCurrentTime, 1000);
-        loadNtpMinerGroups();
+<script>
+// Same working functions - updated for single server and better feedback
+let isUpdating = false;
+
+function showNtpModal() {
+    console.log('🚀 Opening NTP Modal...');
+    document.getElementById('ntpModalOverlay').style.display = 'block';
+    document.getElementById('ntpModal').style.display = 'block';
+}
+
+function closeNtpModal() {
+    if (isUpdating) {
+        if (!confirm('Update is in progress! Are you sure you want to cancel?')) {
+            return;
+        }
     }
-    
-    function updateCurrentTime() {
-        const now = new Date();
-        const timeString = now.toLocaleString('en-US', {
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
-        });
-        document.getElementById('currentTime').textContent = timeString;
+    document.getElementById('ntpModalOverlay').style.display = 'none';
+    document.getElementById('ntpModal').style.display = 'none';
+    isUpdating = false;
+}
+
+function setIranianServer() {
+    document.getElementById('ntpServer').value = 'ir.pool.ntp.org';
+}
+
+function clearServer() {
+    document.getElementById('ntpServer').value = '';
+}
+
+function runSuperUpdate() {
+    if (isUpdating) {
+        alert('⚠️ Update is already running!');
+        return;
     }
+
+    const enableNTP = document.getElementById('enableNTP').checked;
+    const ntpServer = document.getElementById('ntpServer').value.trim();
+    const timezone = document.getElementById('timezoneSelect').value;
     
-    function syncWithBrowser() {
-        const now = Math.floor(Date.now() / 1000);
-        showNotification('🔄 Syncing time with browser...', 'info');
-        // This would typically send to backend for miner sync
+    if (enableNTP && !ntpServer) {
+        alert('⚠️ Please enter NTP server address');
+        return;
+    }
+
+    // Use miners defined in main.py
+    const miners = ['131', '132', '133', '65', '66', '70'];
+    const progressBar = document.getElementById('ntpProgressBar');
+    const progressText = document.getElementById('ntpProgressText');
+    const statusText = document.getElementById('currentStatus');
+    
+    let completed = 0;
+    const total = miners.length;
+    
+    // Reset progress
+    progressBar.style.width = '0%';
+    progressText.textContent = '0%';
+    statusText.textContent = '🔄 Starting update...';
+    statusText.style.color = '#fbbf24';
+    
+    isUpdating = true;
+    
+    console.log(`🚀 Starting super update for ${total} miners...`);
+    
+    // Show immediate feedback
+    setTimeout(() => {
+        statusText.textContent = '⏳ Connecting to miners...';
+    }, 100);
+    
+    miners.forEach((miner, index) => {
         setTimeout(() => {
-            showNotification('✅ Time synced with browser', 'success');
-        }, 1000);
-    }
-    
-    function loadNtpMinerGroups() {
-        const groupsContainer = document.getElementById('ntpMinerGroups');
-        groupsContainer.innerHTML = `
-            <div class="miner-group">
-                <div class="group-title">
-                    <span>📊 Group A (131-133)</span>
-                    <span class="pool-badge">3 MINERS</span>
-                </div>
-                <div class="miners-grid">
-                    ${['131', '132', '133'].map(miner => `
-                        <div class="miner-card" onclick="toggleNtpMiner('${miner}')" style="--miner-color: ${getMinerColor(miner)}">
-                            <div class="miner-info">
-                                <div class="miner-icon">🛠️</div>
-                                <div class="miner-details">
-                                    <div class="miner-name">${miner}TH</div>
-                                    <div class="miner-id">MINER ${miner}</div>
-                                </div>
-                                <input type="checkbox" class="miner-checkbox" id="ntp_miner_${miner}" onchange="updateNtpCardState('${miner}')">
-                            </div>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>
-            <div class="miner-group">
-                <div class="group-title">
-                    <span>🔥 Group B (65-70)</span>
-                    <span class="pool-badge">3 MINERS</span>
-                </div>
-                <div class="miners-grid">
-                    ${['65', '66', '70'].map(miner => `
-                        <div class="miner-card" onclick="toggleNtpMiner('${miner}')" style="--miner-color: ${getMinerColor(miner)}">
-                            <div class="miner-info">
-                                <div class="miner-icon">🛠️</div>
-                                <div class="miner-details">
-                                    <div class="miner-name">${miner}TH</div>
-                                    <div class="miner-id">MINER ${miner}</div>
-                                </div>
-                                <input type="checkbox" class="miner-checkbox" id="ntp_miner_${miner}" onchange="updateNtpCardState('${miner}')">
-                            </div>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>
-        `;
-        
-        // Initialize card states
-        ['131', '132', '133', '65', '66', '70'].forEach(miner => {
-            updateNtpCardState(miner);
-        });
-        updateNtpSelection();
-    }
-    
-    function getMinerColor(miner) {
-        const colors = {
-            '131': '#3B82F6', '132': '#10B981', '133': '#8B5CF6',
-            '65': '#F59E0B', '66': '#EF4444', '70': '#EC4899'
-        };
-        return colors[miner] || '#6B7280';
-    }
-    
-    function toggleNtpMiner(minerId) {
-        const checkbox = document.getElementById('ntp_miner_' + minerId);
-        checkbox.checked = !checkbox.checked;
-        updateNtpCardState(minerId);
-        updateNtpSelection();
-    }
-    
-    function updateNtpCardState(minerId) {
-        const card = document.querySelector(`[onclick="toggleNtpMiner('${minerId}')"]`);
-        const checkbox = document.getElementById('ntp_miner_' + minerId);
-        
-        if (checkbox.checked) {
-            card.classList.add('selected');
-        } else {
-            card.classList.remove('selected');
-        }
-    }
-    
-    function updateNtpSelection() {
-        selectedNtpMiners = Array.from(document.querySelectorAll('input[id^="ntp_miner_"]:checked'))
-            .map(miner => miner.id.replace('ntp_miner_', ''));
-        
-        console.log('Selected NTP miners:', selectedNtpMiners);
-    }
-    
-    function selectNtpGroup(group) {
-        const miners = {
-            'all': ['131', '132', '133', '65', '66', '70'],
-            'A': ['131', '132', '133'],
-            'B': ['65', '66', '70']
-        }[group];
-        
-        miners.forEach(miner => {
-            const checkbox = document.getElementById('ntp_miner_' + miner);
-            checkbox.checked = true;
-            updateNtpCardState(miner);
-        });
-        
-        updateNtpSelection();
-    }
-    
-    function deselectNtpAll() {
-        ['131', '132', '133', '65', '66', '70'].forEach(miner => {
-            const checkbox = document.getElementById('ntp_miner_' + miner);
-            checkbox.checked = false;
-            updateNtpCardState(miner);
-        });
-        
-        updateNtpSelection();
-    }
-    
-    function toggleNtpServers() {
-        const ntpEnabled = document.getElementById('ntpEnabled').checked;
-        const serversContainer = document.getElementById('ntpServersContainer');
-        
-        if (ntpEnabled) {
-            serversContainer.classList.remove('disabled');
-        } else {
-            serversContainer.classList.add('disabled');
-        }
-    }
-    
-    function fillIranianServers() {
-        document.getElementById('ntpServer1').value = 'ir.pool.ntp.org';
-        document.getElementById('ntpServer2').value = '0.ir.pool.ntp.org';
-        document.getElementById('ntpServer3').value = '1.ir.pool.ntp.org';
-        document.getElementById('ntpServer4').value = '2.ir.pool.ntp.org';
-        showNotification('🇮🇷 Iranian NTP servers loaded', 'success');
-    }
-    
-    function clearNtpServers() {
-        document.getElementById('ntpServer1').value = '';
-        document.getElementById('ntpServer2').value = '';
-        document.getElementById('ntpServer3').value = '';
-        document.getElementById('ntpServer4').value = '';
-        showNotification('🗑️ NTP servers cleared', 'info');
-    }
-    
-    function applyNtpSettings() {
-        if (selectedNtpMiners.length === 0) {
-            showNotification('❌ Please select at least one miner', 'error');
-            return;
-        }
-        
-        const timezone = document.getElementById('timezoneSelect').value;
-        const ntpEnabled = document.getElementById('ntpEnabled').checked;
-        const ntpServers = [
-            document.getElementById('ntpServer1').value.trim(),
-            document.getElementById('ntpServer2').value.trim(),
-            document.getElementById('ntpServer3').value.trim(),
-            document.getElementById('ntpServer4').value.trim()
-        ].filter(server => server !== '');
-        
-        // Validate NTP servers if enabled
-        if (ntpEnabled && ntpServers.length === 0) {
-            showNotification('❌ Please enter at least one NTP server', 'error');
-            return;
-        }
-        
-        const progressBar = document.getElementById('ntpUpdateProgress');
-        const progressText = document.getElementById('ntpProgressText');
-        progressBar.style.width = '0%';
-        progressText.textContent = '0%';
-        
-        showNotification('🔄 Starting NTP configuration update...', 'info');
-        
-        // Update miners sequentially
-        updateNtpMinersSequentially(selectedNtpMiners, timezone, ntpEnabled, ntpServers, 0, progressBar, progressText);
-    }
-    
-    function updateNtpMinersSequentially(miners, timezone, ntpEnabled, ntpServers, currentIndex, progressBar, progressText) {
-        if (currentIndex >= miners.length) {
-            progressBar.style.width = '100%';
-            progressText.textContent = '100%';
-            setTimeout(() => {
-                showNotification('✅ All NTP settings updated successfully!', 'success');
-                closeNtpModal();
-            }, 1000);
-            return;
-        }
-        
-        const miner = miners[currentIndex];
-        const progress = ((currentIndex + 1) / miners.length) * 100;
-        progressBar.style.width = progress + '%';
-        progressText.textContent = Math.round(progress) + '%';
-        
-        showNotification(`🔄 Configuring NTP for Miner ${miner} (${currentIndex + 1}/${miners.length})`, 'info');
-        
-        fetch('/update_ntp', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                miner: miner,
-                timezone: timezone,
-                ntp_enabled: ntpEnabled,
-                ntp_servers: ntpServers
-            })
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                showNotification(`✅ ${data.success}`, 'success');
-            } else {
-                showNotification(`❌ Miner ${miner}: ${data.error}`, 'error');
-            }
-            // Move to next miner
-            updateNtpMinersSequentially(miners, timezone, ntpEnabled, ntpServers, currentIndex + 1, progressBar, progressText);
-        })
-        .catch(error => {
-            showNotification(`❌ Error updating miner ${miner}: ${error}`, 'error');
-            // Continue with next miner even if this one fails
-            updateNtpMinersSequentially(miners, timezone, ntpEnabled, ntpServers, currentIndex + 1, progressBar, progressText);
-        });
-    }
-    
-    function showNtpModal() {
-        console.log('⏰ Opening NTP Modal...');
-        const overlay = document.getElementById('ntpModalOverlay');
-        const modal = document.getElementById('ntpModal');
-        
-        if (overlay && modal) {
-            overlay.style.display = 'block';
-            modal.style.display = 'block';
-            console.log('✅ NTP Modal opened successfully');
+            statusText.textContent = `🔄 Updating miner ${miner}...`;
+            statusText.style.color = '#fbbf24';
             
-            // Initialize modal
-            setTimeout(() => {
-                initializeNtpModal();
-            }, 100);
-        } else {
-            console.error('❌ NTP Modal elements not found');
-            alert('NTP configuration is not available');
-        }
-    }
-    
-    function closeNtpModal() {
-        const overlay = document.getElementById('ntpModalOverlay');
-        const modal = document.getElementById('ntpModal');
-        
-        if (overlay && modal) {
-            overlay.style.display = 'none';
-            modal.style.display = 'none';
-        }
-    }
-    
-    // Close modal when clicking outside
-    document.addEventListener('click', function(event) {
-        if (event.target === document.getElementById('ntpModalOverlay')) {
-            closeNtpModal();
-        }
+            fetch('/update_ntp', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    miner: miner,
+                    ntp_enabled: enableNTP,
+                    ntp_servers: ntpServer ? [ntpServer] : [], // Single server
+                    timezone: timezone
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                completed++;
+                const progress = Math.round((completed / total) * 100);
+                progressBar.style.width = progress + '%';
+                progressText.textContent = progress + '%';
+                
+                console.log(`✅ Miner ${miner}:`, data);
+                
+                if (data.success) {
+                    statusText.textContent = `✅ ${miner}: ${data.message}`;
+                    statusText.style.color = '#86efac';
+                } else {
+                    statusText.textContent = `❌ ${miner}: ${data.message}`;
+                    statusText.style.color = '#fca5a5';
+                }
+                
+                if (completed === total) {
+                    isUpdating = false;
+                    setTimeout(() => {
+                        statusText.textContent = '🎉 All miners updated successfully!';
+                        statusText.style.color = '#86efac';
+                        setTimeout(() => {
+                            alert('✅ Super NTP Update completed successfully!');
+                            closeNtpModal();
+                        }, 1000);
+                    }, 500);
+                }
+            })
+            .catch(err => {
+                completed++;
+                const progress = Math.round((completed / total) * 100);
+                progressBar.style.width = progress + '%';
+                progressText.textContent = progress + '%';
+                
+                console.error(`❌ Miner ${miner}:`, err);
+                statusText.textContent = `❌ Error on ${miner}`;
+                statusText.style.color = '#fca5a5';
+                
+                if (completed === total) {
+                    isUpdating = false;
+                    setTimeout(() => {
+                        alert('⚠️ Some miners may not be updated');
+                        closeNtpModal();
+                    }, 500);
+                }
+            });
+        }, index * 800); // 800ms delay between requests
     });
-    </script>
-    '''
+}
+</script>
+'''
